@@ -1,10 +1,3 @@
----
-
-editor_options: 
-  markdown: 
-    wrap: 72
----
-
 # Breast Cancer Spatial Transcriptomics: Tissue Composition Dashboard
 
 An interactive R Shiny dashboard that visualizes **spot-level tissue composition** from a spatial transcriptomics study of triple-negative breast cancer (TNBC). Each tissue spot on a Visium slide is annotated with a dominant tissue type: Tumor, Stroma, Immune, Necrosis, Fat, or Mixedbased, on cell-type deconvolution fractions. The dashboard enables exploration of how tissue types are spatially distributed within individual slides and how composition varies across the full patient cohort.
