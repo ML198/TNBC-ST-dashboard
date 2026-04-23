@@ -1,0 +1,731 @@
+---
+title: "Breast Cancer Spatial Transcriptomics: Tissue Composition Dashboard"
+author: "DATA 555 Module 4"
+date: "April 17, 2026"
+output:
+  flexdashboard::flex_dashboard:
+    theme: flatly
+    toc: false
+    self_contained: false
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+library(shiny)
+library(shinydashboard)
+library(dplyr)
+library(tidyr)
+library(plotly)
+```
+
+```{r load-data, include=FALSE}
+LABEL_COLORS <- c(
+  "Tumor"    = "#FB8072",
+  "Stroma"   = "#8DD3C7",
+  "Immune"   = "#80B1D3",
+  "Necrosis" = "#B3DE69",
+  "Fat"      = "#FDB462",
+  "Mixed"    = "#FFFFB3",
+  "Other"    = "#BEBADA"
+)
+
+project_dir <- "/Users/mingruili/Library/CloudStorage/OneDrive-Emory/ST/ST"
+ann_dir     <- file.path(project_dir, "data", "cap", "spot_annotations")
+
+ann_files       <- list.files(ann_dir, pattern = "\\.RDS$", full.names = TRUE)
+ann_list        <- lapply(ann_files, readRDS)
+names_from_file <- tools::file_path_sans_ext(basename(ann_files))
+
+ann_all <- dplyr::bind_rows(ann_list, .id = "file_idx")
+ann_all$sample_id <- rep(names_from_file, times = sapply(ann_list, nrow))
+
+ann_all <- ann_all %>%
+  tidyr::separate(spot_id, into = c("spot_row", "spot_col"),
+                  sep = "x", remove = FALSE, convert = TRUE) %>%
+  dplyr::rename(x = spot_col, y = spot_row)
+
+ann_all <- ann_all %>%
+  dplyr::mutate(
+    label_simple = dplyr::case_when(
+      hard_label == "Tumor"                   ~ "Tumor",
+      hard_label == "Stroma"                  ~ "Stroma",
+      hard_label %in% c("Lymphocytes", "TLS") ~ "Immune",
+      hard_label == "Necrosis"                ~ "Necrosis",
+      hard_label == "Fat tissue"              ~ "Fat",
+      hard_label == "Mixed"                   ~ "Mixed",
+      TRUE                                    ~ "Other"
+    )
+  )
+
+slides <- sort(unique(ann_all$sample_id))
+
+composition_raw <- ann_all %>%
+  dplyr::group_by(sample_id, label_simple) %>%
+  dplyr::summarise(n_spots = dplyr::n(), .groups = "drop") %>%
+  dplyr::group_by(sample_id) %>%
+  dplyr::mutate(
+    total_spots = sum(n_spots),
+    pct         = round(100 * n_spots / total_spots, 1)
+  ) %>%
+  dplyr::ungroup()
+
+tumor_order <- composition_raw %>%
+  dplyr::filter(label_simple == "Tumor") %>%
+  dplyr::select(sample_id, tumor_pct = pct)
+
+composition <- composition_raw %>%
+  dplyr::left_join(tumor_order, by = "sample_id") %>%
+  dplyr::mutate(tumor_pct = tidyr::replace_na(tumor_pct, 0))
+```
+
+```{r dashboard, echo=FALSE}
+# ══════════════════════════════════════════════════════════════════════════
+# UI
+# ══════════════════════════════════════════════════════════════════════════
+ui <- shinydashboard::dashboardPage(
+  skin = "blue",
+
+  shinydashboard::dashboardHeader(
+    title = tags$span("TNBC Spatial Transcriptomics", style = "font-size:15px;")
+  ),
+
+  # ── Sidebar ─────────────────────────────────────────────────────────────
+  shinydashboard::dashboardSidebar(
+    width = 200,
+
+    shinydashboard::sidebarMenu(
+      id = "sidebar_menu",
+
+      # Page 1: Overview
+      shinydashboard::menuItem(
+        "Overview",
+        tabName = "page_overview",
+        icon    = icon("home")
+      ),
+
+      # Page 2: Figures — expandable with two sub-items
+      shinydashboard::menuItem(
+        "Figures",
+        icon          = icon("chart-bar"),
+        startExpanded = TRUE,
+
+        shinydashboard::menuSubItem(
+          "All Samples",
+          tabName = "tab_all",
+          icon    = icon("th")
+        ),
+
+        shinydashboard::menuSubItem(
+          "Single Sample",
+          tabName = "tab_single",
+          icon    = icon("microscope")
+        )
+      )
+    ),
+
+    tags$hr(style = "border-color:#444; margin:6px 14px;"),
+
+    # Single-sample controls — only visible on the Single Sample sub-tab
+    conditionalPanel(
+      condition = "input.sidebar_menu == 'tab_single'",
+
+      tags$div(
+        style = "padding:4px 14px; color:#ccc; font-size:11px;
+                 font-weight:600; text-transform:uppercase; letter-spacing:1px;",
+        "Sample Controls"
+      ),
+
+      selectInput("selected_slide", "Select Slide:",
+                  choices = slides, selected = slides[1], width = "100%"),
+
+      checkboxGroupInput("selected_labels", "Show Tissue Types:",
+                         choices  = names(LABEL_COLORS),
+                         selected = names(LABEL_COLORS),
+                         width    = "100%"),
+
+      tags$hr(style = "border-color:#444; margin:6px 14px;"),
+      tags$div(
+        style = "padding:4px 14px; color:#ccc; font-size:11px;
+                 font-weight:600; text-transform:uppercase; letter-spacing:1px;",
+        "Slide Summary"
+      ),
+      uiOutput("kpi_boxes")
+    )
+
+    # tags$hr(style = "border-color:#444; margin:6px 14px;"),
+    # tags$div(
+    #   style = "padding:8px 14px; color:#aaa; font-size:11px; line-height:1.7;",
+    #   tags$b("Note:"), tags$br(),
+    #   "Each spot covers ~55 µm of tissue.", tags$br(),
+    #   "Hard labels: 60% dominance threshold.", tags$br(), tags$br(),
+    #   tags$a(
+    #     href   = "https://github.com/ML198/TNBC-ST-dashboard",
+    #     target = "_blank",
+    #     style  = "color:#5bc0de; text-decoration:underline;",
+    #     icon("github"), " GitHub Repository"
+    #   )
+    # )
+  ),
+
+  # ── Body ────────────────────────────────────────────────────────────────
+  shinydashboard::dashboardBody(
+    tags$head(tags$style(HTML("
+      /* hide the flexdashboard outer title/navbar so only shinydashboard shows */
+      .navbar.navbar-fixed-top { display: none !important; }
+      body { padding-top: 0 !important; }
+
+      .content-wrapper { background-color:#f4f6f9; }
+      .box { border-radius:6px; box-shadow:0 1px 4px rgba(0,0,0,.12); }
+      .kpi-box {
+        background:#1e3a5f; border-radius:6px; margin:5px 14px;
+        padding:9px 14px; color:white;
+      }
+      .kpi-val { font-size:24px; font-weight:700; color:#5bc0de; }
+      .kpi-lbl { font-size:10px; color:#aac4e0; text-transform:uppercase;
+                 letter-spacing:.5px; }
+      .takeaway-box {
+        background:#fff; border-left:4px solid #2c6fad; border-radius:4px;
+        padding:12px 16px; margin-top:4px;
+        font-size:13px; line-height:1.6; color:#333;
+      }
+      .takeaway-box b { color:#2c6fad; }
+      .impact-box {
+        background:#f0f7ff; border-left:4px solid #1e3a5f; border-radius:4px;
+        padding:12px 16px; font-size:13px; line-height:1.6; color:#333;
+      }
+      .impact-box b { color:#1e3a5f; }
+      .chart-title { font-size:15px; font-weight:700; color:#1e3a5f; margin:0 0 2px; }
+      .chart-sub   { font-size:12px; color:#888; margin-bottom:8px; }
+      .overview-section { margin-bottom:10px; font-size:14px; line-height:1.7; color:#333; }
+      .overview-section b { color:#1e3a5f; }
+      .skin-blue .main-sidebar .sidebar .sidebar-menu .active > a,
+      .skin-blue .main-sidebar .sidebar .sidebar-menu .active > a:hover {
+        background-color:#1e3a5f;
+        border-left:3px solid #5bc0de;
+      }
+      .cohort-kpi-row { margin-bottom:3px; }
+      .cohort-kpi-card {
+        background:#fff; border-radius:6px; padding:10px 0;
+        box-shadow:0 1px 4px rgba(0,0,0,.10);
+        border-top:3px solid #2c6fad; text-align:center; margin:0;
+        display:flex; flex-direction:column;
+        align-items:center; justify-content:center; min-height:97px;
+      }
+      .cohort-kpi-card .ck-val {
+        font-size:23px; font-weight:700; color:#1e3a5f; line-height:1.1;
+      }
+      .cohort-kpi-card .ck-lbl {
+        font-size:11px; color:#888; text-transform:uppercase;
+        letter-spacing:.6px; margin-top:3px;
+      }
+      .cohort-kpi-card .ck-sub { font-size:11px; color:#aaa; margin-top:2px; }
+      .cohort-kpi-card.accent-red  { border-top-color:#FB8072; }
+      .cohort-kpi-card.accent-teal { border-top-color:#8DD3C7; }
+      .cohort-kpi-card.accent-blue { border-top-color:#80B1D3; }
+      .cohort-kpi-card.accent-gold { border-top-color:#FDB462; }
+      .cohort-kpi-card.accent-gray { border-top-color:#BEBADA; }
+    "))),
+
+    shinydashboard::tabItems(
+
+      # ══════════════════════════════════════════════════════════════════
+      # PAGE 1 — Overview (dataset description + impact)
+      # ══════════════════════════════════════════════════════════════════
+      shinydashboard::tabItem(
+        tabName = "page_overview",
+
+        fluidRow(
+          shinydashboard::box(
+            width = 12,
+            tags$h3("About This Dashboard",
+                    style = "color:#1e3a5f; margin-top:0; margin-bottom:16px;"),
+
+            tags$div(
+              class = "overview-section",
+              "This dashboard explores ", tags$b("spot-level tissue composition"),
+              " from a spatial transcriptomics study of triple-negative breast cancer (TNBC). ",
+              "Each tissue spot on a Visium slide is annotated with a dominant tissue type, Tumor, Stroma, Immune, etc. — based on the fraction of cell types estimated from gene expression. Use the ", tags$b("Figures"), " menu to explore how
+               tissue types are spatially distributed across individual slides and how
+               composition varies across the full cohort."
+            ),
+
+            tags$hr(),
+
+            tags$h4("Dataset Description",
+                    style = "color:#1e3a5f; margin-top:12px; margin-bottom:12px;"),
+
+            tags$div(
+              class = "overview-section",
+              tags$b("Source: "),
+              "Spatial transcriptomics data are from a publicly available breast cancer
+               cohort described in ",
+              tags$a(
+                href   = "https://doi.org/10.1038/s41467-024-54145-w",
+                target = "_blank",
+                "Andersson et al. (2024), Nature Communications"
+              ),
+              "; spot-level tissue annotations were derived using the companion
+               STNavigation deconvolution pipeline."
+            ),
+
+            tags$div(
+              class = "overview-section",
+              tags$b("Sample Size: "),
+              paste0(
+                "The dataset contains ", length(slides),
+                " breast cancer tissue sections (Visium slides), yielding a total of ",
+                formatC(nrow(ann_all), format = "d", big.mark = ","),
+                " annotated capture spots (each ~55 µm in diameter) across the cohort."
+              )
+            ),
+
+            tags$div(
+              class = "overview-section",
+              tags$b("Data Collection: "),
+              "Gene expression data were generated using the 10x Genomics Visium
+               spatial transcriptomics platform, which captures mRNA from spatially
+               barcoded spots arrayed across a tissue section, co-localising
+               transcriptomic profiles with tissue histology."
+            ),
+
+            tags$div(
+              class = "overview-section",
+              tags$b("Study Population: "),
+              "Primary breast cancer tumor resections from human patients;
+               tissue sections were derived from surgically excised specimens
+               spanning multiple breast cancer subtypes including TNBC."
+            ),
+
+            tags$div(
+              class = "overview-section",
+              tags$b("Time Period & Location: "),
+              "Samples were collected and processed as part of the study published
+               in 2024; specimens reflect archival and prospective material from
+               clinical institutions in Sweden."
+            ),
+
+            tags$hr(),
+
+            tags$p(
+              style = "color:#666; font-size:12px; line-height:1.6;",
+              tags$b("Label assignment: "),
+              "Hard tissue-type labels (Tumor, Stroma, Immune, Necrosis, Fat, Mixed)
+               were assigned per spot using a 60% cell-type dominance threshold applied
+               to cell-fraction estimates from STNavigation. Spots not meeting the 60%
+               threshold for any single type are labeled 'Mixed'."
+            ),
+
+            tags$p(
+              style = "color:#666; font-size:12px;",
+              tags$a(
+                href   = "https://github.com/ML198/TNBC-ST-dashboard",
+                target = "_blank",
+                style  = "color:#2c6fad;",
+                icon("github"), " Source code: github.com/ML198/TNBC-ST-dashboard"
+              )
+            )
+          )
+        ),
+
+        fluidRow(
+          shinydashboard::box(
+            width = 12,
+            div(
+              class = "impact-box",
+              tags$b("Why This Matters: "),
+              "Understanding the spatial architecture of tumor, stroma, and immune
+               cells in TNBC — the most aggressive breast cancer subtype — is critical
+               for identifying microenvironmental features associated with treatment
+               resistance and patient outcomes. This dashboard enables researchers and
+               clinicians to rapidly characterize tissue composition across a patient
+               cohort, supporting data-driven prioritization of slides for deeper
+               molecular profiling and therapeutic targeting."
+            )
+          )
+        )
+      ),
+
+      # ══════════════════════════════════════════════════════════════════
+      # FIGURES / Sub-tab A — All Samples (composition bar chart)
+      # ══════════════════════════════════════════════════════════════════
+      shinydashboard::tabItem(
+        tabName = "tab_all",
+
+        uiOutput("cohort_kpis"),
+
+        fluidRow(
+          shinydashboard::box(
+            width = 12,
+            tags$h4("Cell-Type Composition Across All Slides", class = "chart-title"),
+            tags$p(
+              "Stacked bars show the percentage of each tissue type per slide, ",
+              "ordered by descending Tumor content. ",
+              "Click legend items to show or hide individual tissue types.",
+              class = "chart-sub"
+            ),
+            plotlyOutput("plot_composition", height = "460px")
+          )
+        ),
+
+        fluidRow(
+          shinydashboard::box(
+            width = 12,
+            div(class = "takeaway-box",
+              tags$b("Key Takeaway: "),
+              "There is substantial heterogeneity in tissue composition across
+               slides — tumor content varies widely, indicating a mix of tumor-rich
+               and stroma-dominant samples in the cohort. Stroma is the most
+               consistently present tissue type across all slides, underscoring its
+               role as the structural scaffold of the tumor microenvironment. Slides
+               with a higher proportion of Mixed spots tend to have lower pure Tumor
+               fractions, suggesting those samples represent transitional tumor
+               boundaries where a single dominant cell type cannot be assigned."
+            )
+          )
+        )
+      ),
+
+      # ══════════════════════════════════════════════════════════════════
+      # FIGURES / Sub-tab B — Single Sample (spatial map + heatmap)
+      # ══════════════════════════════════════════════════════════════════
+      shinydashboard::tabItem(
+        tabName = "tab_single",
+
+        shinydashboard::tabBox(
+          width = 12, id = "single_tabs",
+
+          # Sub-tab: Spatial Tissue Map
+          tabPanel(
+            title = tags$span(icon("map-marker-alt"), " Spatial Tissue Map"),
+
+            fluidRow(
+              shinydashboard::box(
+                width = 12,
+                tags$h4("Spatial Distribution of Tissue Types", class = "chart-title"),
+                tags$p(
+                  "Each dot is one tissue spot (~55 µm) colored by its annotated cell type. ",
+                  "Hover for spot ID, tissue label, tumor fraction, stroma fraction, and
+                   dominance score. Use the sidebar checkboxes to filter tissue types.",
+                  class = "chart-sub"
+                ),
+                plotlyOutput("plot_spatial", height = "500px")
+              )
+            ),
+
+            fluidRow(
+              shinydashboard::box(
+                width = 12,
+                uiOutput("takeaway_spatial")
+              )
+            )
+          ),
+
+          # Sub-tab: Tumor Fraction Heatmap
+          tabPanel(
+            title = tags$span(icon("fire"), " Tumor Fraction Heatmap"),
+
+            fluidRow(
+              shinydashboard::box(
+                width = 12,
+                tags$h4("Continuous Tumor Fraction per Spot", class = "chart-title"),
+                tags$p(
+                  "Color intensity encodes raw Tumor fraction (0–1 scale). ",
+                  "Dark red = high tumor content; light gray = no tumor. ",
+                  "Hover for exact values and the assigned hard label.",
+                  class = "chart-sub"
+                ),
+                plotlyOutput("plot_heatmap", height = "500px")
+              )
+            ),
+
+            fluidRow(
+              shinydashboard::box(
+                width = 12,
+                uiOutput("takeaway_heatmap")
+              )
+            )
+          )
+
+        ) # end tabBox
+      )   # end tabItem tab_single
+
+    ) # end tabItems
+  )   # end dashboardBody
+)     # end dashboardPage
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# SERVER
+# ══════════════════════════════════════════════════════════════════════════
+server <- function(input, output, session) {
+
+  slide_data <- reactive({
+    ann_all %>%
+      dplyr::filter(sample_id    == input$selected_slide,
+                    label_simple %in% input$selected_labels)
+  })
+
+  # ── Sidebar KPI boxes (Single Sample) ───────────────────────────────────
+  output$kpi_boxes <- renderUI({
+    df         <- ann_all %>% dplyr::filter(sample_id == input$selected_slide)
+    n_spots    <- nrow(df)
+    tumor_pct  <- round(100 * mean(df$label_simple == "Tumor",  na.rm = TRUE), 1)
+    stroma_pct <- round(100 * mean(df$label_simple == "Stroma", na.rm = TRUE), 1)
+    avg_tumor  <- round(mean(df$Tumor, na.rm = TRUE), 2)
+
+    tagList(
+      div(class = "kpi-box",
+          div(formatC(n_spots, format = "d", big.mark = ","), class = "kpi-val"),
+          div("Total Spots",    class = "kpi-lbl")),
+      div(class = "kpi-box",
+          div(paste0(tumor_pct,  "%"), class = "kpi-val"),
+          div("Tumor Spots",     class = "kpi-lbl")),
+      div(class = "kpi-box",
+          div(paste0(stroma_pct, "%"), class = "kpi-val"),
+          div("Stroma Spots",    class = "kpi-lbl")),
+      div(class = "kpi-box",
+          div(avg_tumor,         class = "kpi-val"),
+          div("Avg Tumor Fraction", class = "kpi-lbl"))
+    )
+  })
+
+  # ── Cohort KPI strip (All Samples page) ─────────────────────────────────
+  output$cohort_kpis <- renderUI({
+    n_slides       <- length(unique(ann_all$sample_id))
+    n_spots_total  <- nrow(ann_all)
+    avg_tumor_pct  <- round(mean(ann_all$label_simple == "Tumor",  na.rm = TRUE) * 100, 1)
+    avg_stroma_pct <- round(mean(ann_all$label_simple == "Stroma", na.rm = TRUE) * 100, 1)
+    avg_mixed_pct  <- round(mean(ann_all$label_simple == "Mixed",  na.rm = TRUE) * 100, 1)
+
+    tumor_by_slide <- ann_all %>%
+      dplyr::group_by(sample_id) %>%
+      dplyr::summarise(tp = round(100 * mean(label_simple == "Tumor", na.rm = TRUE), 1),
+                       .groups = "drop")
+    top_slide <- tumor_by_slide %>% dplyr::slice_max(tp, n = 1)
+
+    kpi_card <- function(val, lbl, sub = NULL, accent = "") {
+      column(
+        width = 2,
+        div(
+          class = paste("cohort-kpi-card", accent),
+          div(val, class = "ck-val"),
+          div(lbl, class = "ck-lbl"),
+          if (!is.null(sub)) div(sub, class = "ck-sub")
+        )
+      )
+    }
+
+    fluidRow(
+      class = "cohort-kpi-row",
+      kpi_card(n_slides,
+               "Total Slides",       "in cohort",        "accent-blue"),
+      kpi_card(formatC(n_spots_total, format = "d", big.mark = ","),
+               "Total Spots",        "across all slides", "accent-gray"),
+      kpi_card(paste0(avg_tumor_pct,  "%"),
+               "Avg Tumor",          "across cohort",    "accent-red"),
+      kpi_card(paste0(avg_stroma_pct, "%"),
+               "Avg Stroma",         "across cohort",    "accent-teal"),
+      kpi_card(paste0(avg_mixed_pct,  "%"),
+               "Avg Mixed",          "across cohort",    "accent-gold"),
+      kpi_card(paste0(top_slide$tp[1], "%"),
+               "Highest Tumor Slide", top_slide$sample_id[1], "accent-red")
+    )
+  })
+
+  # ── Widget 1: Composition Stacked Bar (All Samples) ──────────────────────
+  output$plot_composition <- renderPlotly({
+    label_order <- c("Tumor","Stroma","Immune","Necrosis","Fat","Mixed","Other")
+    slide_order <- composition %>%
+      dplyr::filter(label_simple == "Tumor") %>%
+      dplyr::arrange(dplyr::desc(pct)) %>%
+      dplyr::pull(sample_id)
+    missing     <- setdiff(unique(composition$sample_id), slide_order)
+    slide_order <- c(slide_order, missing)
+
+    comp_ord <- composition %>%
+      dplyr::mutate(sample_id = factor(sample_id, levels = slide_order))
+
+    fig <- plot_ly()
+    for (lbl in label_order) {
+      df_l <- comp_ord %>% dplyr::filter(label_simple == lbl)
+      if (nrow(df_l) == 0) next
+      fig <- fig %>% add_trace(
+        x = df_l$sample_id, y = df_l$pct,
+        type = "bar", name = lbl,
+        marker = list(color = LABEL_COLORS[lbl],
+                      line  = list(color = "white", width = 0.5)),
+        text = paste0(
+          "<b>Slide:</b> ",       df_l$sample_id, "<br>",
+          "<b>Tissue type:</b> ", lbl,            "<br>",
+          "<b>Percentage:</b> ",  df_l$pct, "%",  "<br>",
+          "<b>Spot count:</b> ",  df_l$n_spots
+        ),
+        hoverinfo = "text"
+      )
+    }
+    fig %>% layout(
+      barmode = "stack",
+      xaxis   = list(title = "Slide ID", tickangle = -35,
+                     tickfont = list(size = 10), showgrid = FALSE),
+      yaxis   = list(title = "Percentage of Spots (%)", ticksuffix = "%",
+                     range = c(0, 100), showgrid = TRUE, gridcolor = "#eeeeee"),
+      legend  = list(title = list(text = "<b>Tissue Type</b>"),
+                     font  = list(size = 12), traceorder = "normal"),
+      plot_bgcolor  = "white", paper_bgcolor = "white",
+      margin = list(t = 30, b = 110, l = 60, r = 20)
+    ) %>% config(displayModeBar = TRUE, displaylogo = FALSE,
+                 modeBarButtonsToRemove = list("lasso2d", "select2d"))
+  })
+
+  # ── Widget 2a: Spatial Tissue Map (Single Sample) ────────────────────────
+  output$plot_spatial <- renderPlotly({
+    df <- slide_data()
+    sl <- input$selected_slide
+    if (nrow(df) == 0)
+      return(plot_ly() %>% layout(title = "No data for selected filters"))
+
+    fig <- plot_ly()
+    for (lbl in names(LABEL_COLORS)) {
+      df_l <- df %>% dplyr::filter(label_simple == lbl)
+      if (nrow(df_l) == 0) next
+      fig <- fig %>% add_trace(
+        x = df_l$x, y = -df_l$y,
+        type = "scatter", mode = "markers",
+        name = lbl, legendgroup = lbl,
+        marker = list(color   = LABEL_COLORS[lbl], size = 5,
+                      opacity = 0.85, line = list(width = 0)),
+        text = paste0(
+          "<b>Spot:</b> ",            df_l$spot_id,              "<br>",
+          "<b>Label:</b> ",           lbl,                       "<br>",
+          "<b>Tumor fraction:</b> ",  round(df_l$Tumor,    2),   "<br>",
+          "<b>Stroma fraction:</b> ", round(df_l$Stroma,   2),   "<br>",
+          "<b>Dominance score:</b> ", round(df_l$max_prop, 2)
+        ),
+        hoverinfo = "text"
+      )
+    }
+    fig %>% layout(
+      title  = list(text = paste0("<b>Tissue Map — ", sl, "</b>"),
+                    font = list(size = 14)),
+      xaxis  = list(title = "Spot Column Position (grid index)",
+                    showgrid = FALSE, zeroline = FALSE),
+      yaxis  = list(title = "Spot Row Position (grid index)",
+                    showgrid = FALSE, zeroline = FALSE, scaleanchor = "x"),
+      legend = list(title = list(text = "<b>Tissue Type</b>"),
+                    font  = list(size = 12), itemsizing = "constant"),
+      plot_bgcolor  = "white", paper_bgcolor = "white",
+      margin = list(t = 50, b = 40, l = 60, r = 20)
+    ) %>% config(displayModeBar = TRUE, displaylogo = FALSE,
+                 modeBarButtonsToRemove = list("lasso2d", "select2d"))
+  })
+
+  # ── Widget 2b: Tumor Fraction Heatmap (Single Sample) ───────────────────
+  output$plot_heatmap <- renderPlotly({
+    df <- ann_all %>%
+      dplyr::filter(sample_id == input$selected_slide, !is.na(Tumor))
+    sl <- input$selected_slide
+    if (nrow(df) == 0)
+      return(plot_ly() %>% layout(title = "No data for selected slide"))
+
+    plot_ly(
+      x = df$x, y = -df$y,
+      type = "scatter", mode = "markers",
+      marker = list(
+        color      = df$Tumor,
+        colorscale = list(list(0,   "#f0f0f0"), list(0.3, "#fca082"),
+                          list(0.6, "#fb6a4a"), list(1,   "#99000d")),
+        cmin = 0, cmax = 1, size = 5, opacity = 0.9,
+        showscale = TRUE,
+        colorbar  = list(title = list(text = "Tumor<br>Fraction",
+                                      font = list(size = 12)),
+                         tickformat = ".1f", len = 0.6, thickness = 15)
+      ),
+      text = paste0(
+        "<b>Spot:</b> ",            df$spot_id,          "<br>",
+        "<b>Tumor fraction:</b> ",  round(df$Tumor,  3), "<br>",
+        "<b>Stroma fraction:</b> ", round(df$Stroma, 3), "<br>",
+        "<b>Hard label:</b> ",      df$hard_label
+      ),
+      hoverinfo = "text", showlegend = FALSE
+    ) %>% layout(
+      title = list(text = paste0("<b>Tumor Fraction Heatmap — ", sl, "</b>"),
+                   font = list(size = 14)),
+      xaxis = list(title = "Spot Column Position (grid index)",
+                   showgrid = FALSE, zeroline = FALSE),
+      yaxis = list(title = "Spot Row Position (grid index)",
+                   showgrid = FALSE, zeroline = FALSE, scaleanchor = "x"),
+      plot_bgcolor  = "white", paper_bgcolor = "white",
+      margin = list(t = 50, b = 40, l = 60, r = 20)
+    ) %>% config(displayModeBar = TRUE, displaylogo = FALSE,
+                 modeBarButtonsToRemove = list("lasso2d", "select2d"))
+  })
+
+  # ── Dynamic takeaway: Spatial Tissue Map ────────────────────────────────
+  output$takeaway_spatial <- renderUI({
+    df  <- ann_all %>% dplyr::filter(sample_id == input$selected_slide)
+    sl  <- input$selected_slide
+    n_spots      <- nrow(df)
+    top_label    <- df %>% dplyr::count(label_simple, sort = TRUE) %>% dplyr::slice(1)
+    second_label <- df %>% dplyr::count(label_simple, sort = TRUE) %>% dplyr::slice(2)
+    top_pct      <- round(100 * top_label$n    / n_spots, 1)
+    second_pct   <- round(100 * second_label$n / n_spots, 1)
+    tumor_df     <- df %>% dplyr::filter(label_simple == "Tumor")
+    n_tumor      <- nrow(tumor_df)
+    tumor_pct    <- round(100 * n_tumor / n_spots, 1)
+    n_types      <- dplyr::n_distinct(df$label_simple)
+
+    div(class = "takeaway-box",
+      tags$b("Key Takeaway — ", sl, ": "),
+      paste0(
+        "This slide contains ", formatC(n_spots, format = "d", big.mark = ","),
+        " annotated spots across ", n_types, " tissue types. ",
+        top_label$label_simple, " is the dominant tissue, covering ",
+        top_pct, "% of spots",
+        if (nrow(second_label) > 0)
+          paste0(", followed by ", second_label$label_simple, " at ", second_pct, "%")
+        else "", ". ",
+        if (n_tumor > 0)
+          paste0(
+            "Tumor spots (", tumor_pct, "% of this slide) ",
+            "form spatially concentrated clusters visible as contiguous red regions — ",
+            "use the sidebar checkboxes to isolate any tissue type and explore its spatial pattern."
+          )
+        else
+          paste0(
+            "No Tumor-labeled spots are present on this slide. ",
+            "Use the sidebar checkboxes to explore the spatial distribution of each type."
+          )
+      )
+    )
+  })
+
+  # ── Dynamic takeaway: Tumor Fraction Heatmap ─────────────────────────────
+  output$takeaway_heatmap <- renderUI({
+    df <- ann_all %>%
+      dplyr::filter(sample_id == input$selected_slide, !is.na(Tumor))
+    sl           <- input$selected_slide
+    avg_tumor    <- round(mean(df$Tumor, na.rm = TRUE), 2)
+    max_tumor    <- round(max(df$Tumor,  na.rm = TRUE), 2)
+    n_boundary   <- sum(df$Tumor >= 0.3 & df$Tumor <= 0.7, na.rm = TRUE)
+    pct_boundary <- round(100 * n_boundary / nrow(df), 1)
+    high_spots   <- sum(df$Tumor >= 0.6, na.rm = TRUE)
+    pct_high     <- round(100 * high_spots / nrow(df), 1)
+
+    div(class = "takeaway-box",
+      tags$b("Key Takeaway — ", sl, ": "),
+      paste0(
+        "The average Tumor fraction across this slide is ",
+        avg_tumor, " (max: ", max_tumor, "). ",
+        pct_boundary, "% of spots fall in the intermediate range (0.3–0.7), ",
+        "representing boundary zones where tumor and non-tumor tissue mix — ",
+        "these are the spots most sensitive to the dominance threshold choice. ",
+        pct_high, "% of spots have a Tumor fraction ≥ 0.6, ",
+        "corresponding to the dark-red regions visible in the heatmap above."
+      )
+    )
+  })
+}
+
+shinyApp(ui = ui, server = server, options = list(height = 850))
+```
